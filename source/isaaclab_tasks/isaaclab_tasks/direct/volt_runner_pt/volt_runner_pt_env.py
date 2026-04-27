@@ -26,7 +26,7 @@ class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
 
     # env
     decimation = 12
-    episode_length_s = 80.0  #5.0
+    episode_length_s = 80.0
     action_space = 3
     observation_space = 13
     state_space = 0
@@ -88,6 +88,16 @@ class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
     reward_success_bonus = 5.0
     reward_fail_penalty = -5.0
 
+    # visual parking floor (visual only)
+    parking_floor_size_x = 3.0
+    parking_floor_size_y = 2.5
+    parking_floor_z = 0.0005
+
+    # white boundary lines for workspace
+    boundary_line_thickness = 0.04
+    boundary_line_height = 0.0015
+    boundary_line_z = 0.002
+
     # dummy pt model parameter
     pt_sigma = 0.04
 
@@ -131,24 +141,83 @@ class VoltRunnerPtEnv(DirectRLEnv):
         self.curr_vy = torch.zeros((self.num_envs,), device=self.device)
         self.curr_wz = torch.zeros((self.num_envs,), device=self.device)
 
-    def _create_workspace_panel(self):
+    def _create_colored_box(
+        self,
+        prim_path: str,
+        center_xyz: tuple[float, float, float],
+        size_xyz: tuple[float, float, float],
+        color_rgb: tuple[float, float, float],
+    ):
         stage = self.scene.stage
-        env_prim_path = "/World/envs/env_0"
-        panel_path = f"{env_prim_path}/WorkspacePanel"
 
-        panel = UsdGeom.Cube.Define(stage, panel_path)
-        panel.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.001))
-        panel.AddScaleOp().Set(
+        box = UsdGeom.Cube.Define(stage, prim_path)
+        box.AddTranslateOp().Set(Gf.Vec3d(*center_xyz))
+        box.AddScaleOp().Set(
             Gf.Vec3f(
-                self.cfg.workspace_size_x / 2.0,
-                self.cfg.workspace_size_y / 2.0,
-                0.001,
+                size_xyz[0] / 2.0,
+                size_xyz[1] / 2.0,
+                size_xyz[2] / 2.0,
             )
         )
 
-        prim = stage.GetPrimAtPath(panel_path)
+        prim = stage.GetPrimAtPath(prim_path)
         prim.CreateAttribute("primvars:displayColor", Sdf.ValueTypeNames.Color3fArray).Set(
-            [Gf.Vec3f(0.2, 0.6, 0.9)]
+            [Gf.Vec3f(*color_rgb)]
+        )
+
+    def _create_parking_floor(self):
+        env_prim_path = "/World/envs/env_0"
+        floor_path = f"{env_prim_path}/ParkingFloor"
+
+        self._create_colored_box(
+            prim_path=floor_path,
+            center_xyz=(0.0, 0.0, self.cfg.parking_floor_z),
+            size_xyz=(
+                self.cfg.parking_floor_size_x,
+                self.cfg.parking_floor_size_y,
+                0.001,
+            ),
+            color_rgb=(0.08, 0.08, 0.08),
+        )
+
+    def _create_workspace_boundary_lines(self):
+        env_prim_path = "/World/envs/env_0"
+
+        wx = self.cfg.workspace_size_x
+        wy = self.cfg.workspace_size_y
+        t = self.cfg.boundary_line_thickness
+        h = self.cfg.boundary_line_height
+        z = self.cfg.boundary_line_z
+
+        half_x = wx / 2.0
+        half_y = wy / 2.0
+
+        self._create_colored_box(
+            prim_path=f"{env_prim_path}/BoundaryTop",
+            center_xyz=(0.0, half_y, z),
+            size_xyz=(wx, t, h),
+            color_rgb=(1.0, 1.0, 1.0),
+        )
+
+        self._create_colored_box(
+            prim_path=f"{env_prim_path}/BoundaryBottom",
+            center_xyz=(0.0, -half_y, z),
+            size_xyz=(wx, t, h),
+            color_rgb=(1.0, 1.0, 1.0),
+        )
+
+        self._create_colored_box(
+            prim_path=f"{env_prim_path}/BoundaryLeft",
+            center_xyz=(-half_x, 0.0, z),
+            size_xyz=(t, wy, h),
+            color_rgb=(1.0, 1.0, 1.0),
+        )
+
+        self._create_colored_box(
+            prim_path=f"{env_prim_path}/BoundaryRight",
+            center_xyz=(half_x, 0.0, z),
+            size_xyz=(t, wy, h),
+            color_rgb=(1.0, 1.0, 1.0),
         )
 
     def _create_receiver_marker(self):
@@ -209,9 +278,12 @@ class VoltRunnerPtEnv(DirectRLEnv):
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
 
+        # physics ground stays unchanged
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
-        self._create_workspace_panel()
+        # visual-only scene
+        self._create_parking_floor()
+        self._create_workspace_boundary_lines()
         self._create_receiver_marker()
 
         self.scene.clone_environments(copy_from_source=False)
