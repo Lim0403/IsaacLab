@@ -21,12 +21,12 @@ from pxr import Gf, Sdf, UsdGeom
 
 
 @configclass
-class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
-    """Configuration for the Volt Runner Pt environment."""
+class VoltRunnerPtAlignEnvCfg(DirectRLEnvCfg):
+    """Configuration for the Volt Runner Pt ALIGN environment."""
 
     # env
     decimation = 12
-    episode_length_s = 80.0  #5.0
+    episode_length_s = 20.0
     action_space = 3
     observation_space = 13
     state_space = 0
@@ -34,7 +34,13 @@ class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
 
-    # scene
+    # scene 
+    #down is visual best,,, 
+    # scene: InteractiveSceneCfg = InteractiveSceneCfg(
+    # num_envs=64, env_spacing=4.0, replicate_physics=False, clone_in_fabric=False
+    # )
+
+    #real train use it
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=64, env_spacing=4.0, replicate_physics=True, clone_in_fabric=True
     )
@@ -52,18 +58,18 @@ class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
     robot_size_y = 0.20
 
     # receiver spawn region = search region inset by robot size
-    # x: [-0.65, 0.65] inset by 0.12 -> [-0.53, 0.53]
-    # y: [-0.35, 0.35] inset by 0.10 -> [-0.25, 0.25]
     receiver_x_min = -0.53
     receiver_x_max = 0.53
     receiver_y_min = -0.25
     receiver_y_max = 0.25
     receiver_z = 0.203
 
-    # robot spawn line: front-side fixed line
-    robot_spawn_x = -0.60
-    robot_spawn_y_min = -0.30
-    robot_spawn_y_max = 0.30
+    # ALIGN training spawn:
+    # robot starts near receiver, not at the front search line
+    align_spawn_offset_x_min = -0.08
+    align_spawn_offset_x_max = 0.08
+    align_spawn_offset_y_min = -0.08
+    align_spawn_offset_y_max = 0.08
 
     # receiver marker size
     receiver_radius = 0.06
@@ -75,7 +81,7 @@ class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
     action_scale_wz = 0.45
 
     # thresholds
-    detect_pt_threshold = 0.1
+    detect_pt_threshold = 0.10
     success_pt_threshold = 0.90
     success_hold_steps = 10
     success_speed_epsilon = 0.02
@@ -104,10 +110,10 @@ class VoltRunnerPtEnvCfg(DirectRLEnvCfg):
     )
 
 
-class VoltRunnerPtEnv(DirectRLEnv):
-    cfg: VoltRunnerPtEnvCfg
+class VoltRunnerPtAlignEnv(DirectRLEnv):
+    cfg: VoltRunnerPtAlignEnvCfg
 
-    def __init__(self, cfg: VoltRunnerPtEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: VoltRunnerPtAlignEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         self.actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
@@ -152,7 +158,6 @@ class VoltRunnerPtEnv(DirectRLEnv):
         )
 
     def _create_receiver_marker(self):
-        """Create a debug receiver marker for env_0."""
         stage = self.scene.stage
         env_prim_path = "/World/envs/env_0"
         marker_path = f"{env_prim_path}/ReceiverMarker"
@@ -175,7 +180,6 @@ class VoltRunnerPtEnv(DirectRLEnv):
         )
 
     def _update_receiver_marker_env0(self):
-        """Move the debug receiver marker to match receiver position of env_0."""
         if self.num_envs < 1:
             return
 
@@ -388,7 +392,7 @@ class VoltRunnerPtEnv(DirectRLEnv):
         self.curr_vy[env_ids] = 0.0
         self.curr_wz[env_ids] = 0.0
 
-        # receiver spawn: inside central search area, inset by robot footprint
+        # receiver spawn: same as runtime env
         rand_receiver_x = sample_uniform(
             self.cfg.receiver_x_min,
             self.cfg.receiver_x_max,
@@ -407,16 +411,31 @@ class VoltRunnerPtEnv(DirectRLEnv):
 
         root_state = self.robot.data.default_root_state[env_ids].clone()
 
-        # robot spawn: fixed front line, y random only within front-start band
-        rand_spawn_y = sample_uniform(
-            self.cfg.robot_spawn_y_min,
-            self.cfg.robot_spawn_y_max,
+        # robot spawn: near receiver for ALIGN training
+        rand_offset_x = sample_uniform(
+            self.cfg.align_spawn_offset_x_min,
+            self.cfg.align_spawn_offset_x_max,
+            (len(env_ids), 1),
+            self.device,
+        ).squeeze(-1)
+        rand_offset_y = sample_uniform(
+            self.cfg.align_spawn_offset_y_min,
+            self.cfg.align_spawn_offset_y_max,
             (len(env_ids), 1),
             self.device,
         ).squeeze(-1)
 
-        root_state[:, 0] = self.scene.env_origins[env_ids, 0] + self.cfg.robot_spawn_x
-        root_state[:, 1] = self.scene.env_origins[env_ids, 1] + rand_spawn_y
+        spawn_x = self.receiver_x[env_ids] + rand_offset_x
+        spawn_y = self.receiver_y[env_ids] + rand_offset_y
+
+        # workspace clamp
+        x_limit = self.cfg.workspace_size_x / 2.0 - self.cfg.robot_size_x / 2.0
+        y_limit = self.cfg.workspace_size_y / 2.0 - self.cfg.robot_size_y / 2.0
+        spawn_x = torch.clamp(spawn_x, -x_limit, x_limit)
+        spawn_y = torch.clamp(spawn_y, -y_limit, y_limit)
+
+        root_state[:, 0] = self.scene.env_origins[env_ids, 0] + spawn_x
+        root_state[:, 1] = self.scene.env_origins[env_ids, 1] + spawn_y
         root_state[:, 7:] = 0.0
 
         self.robot.write_root_pose_to_sim(root_state[:, :7], env_ids)
@@ -426,8 +445,8 @@ class VoltRunnerPtEnv(DirectRLEnv):
         joint_vel = self.robot.data.default_joint_vel[env_ids].clone()
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        dx = self.receiver_x[env_ids] - self.cfg.robot_spawn_x
-        dy = self.receiver_y[env_ids] - rand_spawn_y
+        dx = self.receiver_x[env_ids] - spawn_x
+        dy = self.receiver_y[env_ids] - spawn_y
         dist = torch.sqrt(dx * dx + dy * dy)
         pt_now = self._compute_pt(dist)
 
