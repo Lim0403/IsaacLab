@@ -60,10 +60,10 @@ class VoltRunnerPtAlignEnvCfg(DirectRLEnvCfg):
 
     # ALIGN training spawn:
     # robot starts near receiver, not at the front search line
-    align_spawn_offset_x_min = -0.08
-    align_spawn_offset_x_max = 0.08
-    align_spawn_offset_y_min = -0.08
-    align_spawn_offset_y_max = 0.08
+    align_spawn_offset_x_min = -0.03
+    align_spawn_offset_x_max = 0.03
+    align_spawn_offset_y_min = -0.03
+    align_spawn_offset_y_max = 0.03
 
     # receiver marker size
     receiver_radius = 0.06
@@ -99,7 +99,7 @@ class VoltRunnerPtAlignEnvCfg(DirectRLEnvCfg):
     boundary_line_z = 0.002
 
     # dummy pt model parameter
-    pt_sigma = 0.04
+    pt_sigma = 0.02
 
     # robot asset
     robot_usd_path = "/home/lim/Desktop/New Folder/vvv_flat.usd"
@@ -365,7 +365,13 @@ class VoltRunnerPtAlignEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         speed_norm = torch.sqrt(self.curr_vx**2 + self.curr_vy**2 + self.curr_wz**2)
-        action_norm_sq = torch.sum(self.actions * self.actions, dim=-1)
+
+        # yaw 회전은 따로 더 강하게 패널티
+        action_penalty = (
+            self.actions[:, 0] ** 2
+            + self.actions[:, 1] ** 2
+            + 3.0 * self.actions[:, 2] ** 2
+        )
 
         x = self.robot.data.root_pos_w[:, 0] - self.scene.env_origins[:, 0]
         y = self.robot.data.root_pos_w[:, 1] - self.scene.env_origins[:, 1]
@@ -380,19 +386,43 @@ class VoltRunnerPtAlignEnv(DirectRLEnv):
             & (speed_norm < self.cfg.success_speed_epsilon)
         )
 
+        # 기본 보상
         reward = (
             self.cfg.reward_alpha_dpt * self.delta_pt
             + self.cfg.reward_beta_pt * self.pt
-            - self.cfg.reward_gamma_action * action_norm_sq
+            - self.cfg.reward_gamma_action * action_penalty
             - self.cfg.reward_delta_time
         )
 
+        # Pt가 0.80 이상부터 0.90까지 갈수록 보상을 더 강하게 증가
+        peak_reward = 3.0 * torch.clamp((self.pt - 0.80) / 0.20, 0.0, 1.0) ** 2
+        reward = reward + peak_reward
+
+        # Pt 0.90 이상에 도달하면 추가 보상
+        high_pt_bonus = torch.where(
+            self.pt >= self.cfg.success_pt_threshold,
+            torch.full_like(reward, 2.0),
+            torch.zeros_like(reward),
+        )
+        reward = reward + high_pt_bonus
+
+        # Pt 0.90 미만인데 멈추면 패널티
+        low_stop_penalty = torch.where(
+            (self.pt < self.cfg.success_pt_threshold)
+            & (speed_norm < self.cfg.success_speed_epsilon),
+            torch.full_like(reward, -1.0),
+            torch.zeros_like(reward),
+        )
+        reward = reward + low_stop_penalty
+
+        # 성공 보너스
         reward = reward + torch.where(
             success_now,
             torch.full_like(reward, self.cfg.reward_success_bonus),
             torch.zeros_like(reward),
         )
 
+        # workspace 밖으로 나가면 실패 패널티
         reward = reward + torch.where(
             out_of_bounds,
             torch.full_like(reward, self.cfg.reward_fail_penalty),

@@ -27,7 +27,10 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 
-CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-22_15-00-44/model_1999.pt"
+#CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-22_15-00-44/model_1999.pt"
+#CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-28_18-42-49/model_1999.pt"
+#CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-29_11-48-26/model_1999.pt"
+CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-29_12-44-07/model_1999.pt"
 DEFAULT_TASK = "Isaac-VoltRunner-Pt-Direct-v0"
 
 P_ALIGN = 0.20
