@@ -14,14 +14,14 @@ class VoltRunnerPtPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # PPO update를 총 몇 번 반복할지
     # 총 학습 transition 수 = num_envs * num_steps_per_env * max_iterations
-    max_iterations = 2000
+    max_iterations = 5000
 
     # 몇 iteration마다 checkpoint를 저장할지
     save_interval = 100
 
     # 로그와 모델이 저장될 실험 이름
     # 저장 위치 예: logs/rsl_rl/volt_runner_pt/날짜_시간/
-    experiment_name = "volt_runner_pt"
+    experiment_name = "volt_runner_pt_align_iter4000"
 
     # observation 자동 정규화 사용 여부
     # 현재 obs는 Pt/action/velocity 위주로 범위가 제한되어 있어 False로 둠
