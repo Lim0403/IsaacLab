@@ -10,7 +10,7 @@ No raster search is used.
 
 Evaluation target:
 - task: Isaac-VoltRunner-Pt-Align-Direct-v0
-- checkpoint: model_1999.pt
+- checkpoint: provided by --checkpoint
 
 Outputs:
 - step_log.csv
@@ -46,7 +46,7 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 
-CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-29_12-44-07/model_1999.pt"
+#CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt_align_iter4000/eval_9998/model_9998.pt"
 DEFAULT_TASK = "Isaac-VoltRunner-Pt-Align-Direct-v0"
 
 
@@ -84,12 +84,17 @@ AppLauncher.add_app_launcher_args(parser)
 
 args_cli, hydra_args = parser.parse_known_args()
 
+if args_cli.checkpoint is None:
+    raise ValueError(
+        "Checkpoint path is required. "
+        "Please provide it with --checkpoint /path/to/model_xxxx.pt"
+    )
+
 if args_cli.video:
     args_cli.enable_cameras = True
 
-# Force ALIGN-only env + trained checkpoint.
+# Force ALIGN-only env.
 args_cli.task = DEFAULT_TASK
-args_cli.checkpoint = CHECKPOINT_PATH
 args_cli.num_envs = 1
 
 sys.argv = [sys.argv[0]] + hydra_args
@@ -441,10 +446,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.dirname(resume_path)
     env_cfg.log_dir = log_dir
 
+    checkpoint_name = Path(resume_path).stem
+
     output_dir = (
-        Path(args_cli.output_dir).expanduser().resolve()
-        if args_cli.output_dir
-        else Path(log_dir) / "align_only_evaluation_model_1999"
+    Path(args_cli.output_dir).expanduser().resolve()
+    if args_cli.output_dir
+    else Path(log_dir) / f"align_only_evaluation_{checkpoint_name}"
     )
     output_dir = ensure_dir(output_dir)
     plots_dir = ensure_dir(output_dir / "plots")

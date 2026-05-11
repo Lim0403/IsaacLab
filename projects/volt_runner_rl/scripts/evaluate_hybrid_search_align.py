@@ -44,9 +44,9 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 
-CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt/2026-04-29_12-44-07/model_1999.pt"
 DEFAULT_TASK = "Isaac-VoltRunner-Pt-Direct-v0"
 
+# Search -> Align 전환 조건
 P_ALIGN = 0.20
 ALIGN_CONFIRM_STEPS = 3
 
@@ -137,19 +137,35 @@ parser.add_argument(
     default=600,
     help="Maximum number of evaluation steps per episode. This is independent from env internal done.",
 )
+parser.add_argument(
+    "--eval_success_hold_steps",
+    type=int,
+    default=5,
+    help=(
+        "Number of consecutive success_now steps required to count evaluation success. "
+        "This is intentionally shorter than the training/env hold window for hybrid evaluation."
+    ),
+)
 
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 
 args_cli, hydra_args = parser.parse_known_args()
 
+if args_cli.checkpoint is None:
+    raise ValueError(
+        "Checkpoint path is required. "
+        "Please provide it with --checkpoint /path/to/model_xxxx.pt"
+    )
+
+if args_cli.eval_success_hold_steps <= 0:
+    raise ValueError("--eval_success_hold_steps must be positive.")
+
 if args_cli.video:
     args_cli.enable_cameras = True
 
-# Force runtime env + trained checkpoint.
-# This matches your original successful hybrid script.
+# Force hybrid evaluation task.
 args_cli.task = DEFAULT_TASK
-args_cli.checkpoint = CHECKPOINT_PATH
 args_cli.num_envs = 1
 
 sys.argv = [sys.argv[0]] + hydra_args
@@ -233,6 +249,7 @@ def read_env0_state_before_step(
     episode_id: int,
     step: int,
     time_s: float,
+    prev_pt: float | None = None,
 ):
     """Read env_0 state before calling env.step().
 
@@ -240,7 +257,12 @@ def read_env0_state_before_step(
     """
     policy_obs = obs["policy"]
     pt = float(policy_obs[0, 0].detach().cpu().item())
-    delta_pt = float(policy_obs[0, 1].detach().cpu().item())
+
+    # CSV 기록용 delta_pt는 obs에 의존하지 않고 평가 코드에서 직접 계산한다.
+    if prev_pt is None:
+        delta_pt = 0.0
+    else:
+        delta_pt = pt - prev_pt
 
     robot_x, robot_y = get_local_robot_xy(env_unwrapped)
 
@@ -259,13 +281,13 @@ def read_env0_state_before_step(
     vy_cmd = action_y * float(env_unwrapped.cfg.action_scale_vy)
     wz_cmd = action_wz * float(env_unwrapped.cfg.action_scale_wz)
 
-    # Use the currently applied velocity stored in the environment for success stability.
-    # This represents the robot's current command/velocity state before the next action is applied.
     curr_vx = float(env_unwrapped.curr_vx[0].detach().cpu().item())
     curr_vy = float(env_unwrapped.curr_vy[0].detach().cpu().item())
     curr_wz = float(env_unwrapped.curr_wz[0].detach().cpu().item())
     speed_norm = math.sqrt(curr_vx * curr_vx + curr_vy * curr_vy + curr_wz * curr_wz)
 
+    # success_now는 "현재 step에서 성공 조건을 만족했는가"이다.
+    # eval_success는 아래 main loop에서 success_now가 연속으로 몇 step 유지됐는지 보고 결정한다.
     success_now = (
         pt >= float(env_unwrapped.cfg.success_pt_threshold)
         and speed_norm < float(env_unwrapped.cfg.success_speed_epsilon)
@@ -526,10 +548,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.dirname(resume_path)
     env_cfg.log_dir = log_dir
 
+    checkpoint_name = Path(resume_path).stem
+
     output_dir = (
         Path(args_cli.output_dir).expanduser().resolve()
         if args_cli.output_dir
-        else Path(log_dir) / "hybrid_evaluation_model_1999_v2"
+        else Path(log_dir) / f"hybrid_evaluation_{checkpoint_name}"
     )
     output_dir = ensure_dir(output_dir)
     plots_dir = ensure_dir(output_dir / "plots")
@@ -589,14 +613,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     env_unwrapped = env.unwrapped
 
+    print("=" * 80)
+    print("[INFO] Evaluation success settings")
+    print(f"[INFO] success_pt_threshold: {env_unwrapped.cfg.success_pt_threshold}")
+    print(f"[INFO] success_speed_epsilon: {env_unwrapped.cfg.success_speed_epsilon}")
+    print(f"[INFO] env success_hold_steps: {env_unwrapped.cfg.success_hold_steps}")
+    print(f"[INFO] eval_success_hold_steps: {args_cli.eval_success_hold_steps}")
+    print("=" * 80)
+
     raster = RasterSearchController(
         x_min=-0.65,
         x_max=0.65,
         y_min=-0.35,
         y_max=0.35,
         lane_spacing_x=0.08,
-        search_vx=0.12,
-        search_vy=0.20,
+        search_vx=0.18,
+        search_vy=0.30,
         pos_tol=0.02,
     )
 
@@ -613,6 +645,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     hybrid_mode = "SEARCH"
     align_counter = 0
     eval_success_counter = 0
+    prev_pt_for_delta = None
     global_timestep = 0
 
     print("=" * 80)
@@ -666,6 +699,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 episode_id=episode_id,
                 step=episode_step,
                 time_s=episode_step * dt,
+                prev_pt=prev_pt_for_delta,
             )
 
             # -----------------------------
@@ -676,14 +710,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 eval_success_counter = 0
 
-            eval_success = eval_success_counter >= int(env_unwrapped.cfg.success_hold_steps)
-            eval_timeout = episode_step >= int(args_cli.max_eval_steps) - 1
+            eval_success = eval_success_counter >= int(args_cli.eval_success_hold_steps)
+            eval_timeout_raw = episode_step >= int(args_cli.max_eval_steps) - 1
             eval_out_of_bounds = bool(row["eval_out_of_bounds"])
 
-            eval_done = eval_success or eval_timeout or eval_out_of_bounds
+            # Success has priority over timeout.
+            if eval_success:
+                eval_done = True
+                eval_timeout = False
+            elif eval_out_of_bounds:
+                eval_done = True
+                eval_timeout = False
+            elif eval_timeout_raw:
+                eval_done = True
+                eval_timeout = True
+            else:
+                eval_done = False
+                eval_timeout = False
 
             row["eval_success"] = bool(eval_success)
-            row["eval_timeout"] = bool(eval_timeout and not eval_success)
+            row["eval_timeout"] = bool(eval_timeout)
             row["eval_out_of_bounds"] = bool(eval_out_of_bounds and not eval_success)
             row["eval_done"] = bool(eval_done)
 
@@ -708,11 +754,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # The row was already captured before automatic reset contamination.
                 if env_done_value:
                     row["eval_done"] = True
-                    if not row["eval_success"] and not row["eval_out_of_bounds"]:
+
+                    # If Pt is already above threshold, count it as success instead of timeout.
+                    if (not row["eval_out_of_bounds"]) and (
+                        row["pt"] >= float(env_unwrapped.cfg.success_pt_threshold)
+                    ):
+                        row["eval_success"] = True
+                        row["eval_timeout"] = False
+                        row["eval_out_of_bounds"] = False
+                    elif row["eval_out_of_bounds"]:
+                        row["eval_success"] = False
+                        row["eval_timeout"] = False
+                        row["eval_out_of_bounds"] = True
+                    else:
+                        row["eval_success"] = False
                         row["eval_timeout"] = True
+                        row["eval_out_of_bounds"] = False
             else:
                 row["reward"] = 0.0
                 row["env_done"] = False
+
+            prev_pt_for_delta = row["pt"]
 
             episode_rows.append(row)
             all_step_rows.append(row)
@@ -765,6 +827,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 hybrid_mode = "SEARCH"
                 align_counter = 0
                 eval_success_counter = 0
+                prev_pt_for_delta = None
 
                 episode_id += 1
                 episode_step = 0
