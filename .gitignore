@@ -73,3 +73,13 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Local backups
+*.bak
+backup_before_slow_model/
+
+# Training outputs and exported models
+logs/
+*.pt
+*.pth
+*.onnx

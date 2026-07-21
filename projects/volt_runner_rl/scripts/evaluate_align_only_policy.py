@@ -20,6 +20,12 @@ Outputs:
 - plots/trajectory_ep_xxxx.png
 - plots/pt_over_time_ep_xxxx.png
 - plots/action_over_time_ep_xxxx.png
+
+Notes:
+- delta_pt in step_log.csv is computed inside this evaluation script as:
+    delta_pt = current_pt - previous_pt
+  rather than reading obs["policy"][0, 1] directly.
+- The first step of each episode has delta_pt = 0.0.
 """
 
 import argparse
@@ -46,8 +52,28 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 
-#CHECKPOINT_PATH = "/home/lim/IsaacLab/logs/rsl_rl/volt_runner_pt_align_iter4000/eval_9998/model_9998.pt"
-DEFAULT_TASK = "Isaac-VoltRunner-Pt-Align-Direct-v0"
+# -------------------------------------------------------------------------
+# Task selection
+# -------------------------------------------------------------------------
+# Original fast align task:
+#   This was used for the previous high-speed policy trained with:
+#     action_scale_vx = 0.30
+#     action_scale_vy = 0.25
+#     action_scale_wz = 0.45
+#
+# DEFAULT_TASK = "Isaac-VoltRunner-Pt-Align-Direct-v0"
+#
+# Slow align task:
+#   Use this when evaluating/exporting the slow policy trained with:
+#     action_scale_vx = 0.06
+#     action_scale_vy = 0.05
+#     action_scale_wz = 0.09
+#
+# Important:
+#   If the slow checkpoint is evaluated with the fast task, the action scale
+#   will not match the training condition and the evaluation result can be
+#   misleading.
+DEFAULT_TASK = "Isaac-VoltRunner-Pt-Align-Slow-Direct-v0"
 
 
 parser = argparse.ArgumentParser(description="Evaluate PPO align-only policy with RSL-RL.")
@@ -177,11 +203,28 @@ def read_env0_state_before_step(
     episode_id: int,
     step: int,
     time_s: float,
+    prev_pt: float | None = None,
 ):
-    """Read env_0 state before env.step() to avoid reset-contaminated final states."""
+    """Read env_0 state before env.step() to avoid reset-contaminated final states.
+
+    delta_pt is computed in the evaluation script as:
+        current_pt - previous_pt
+
+    The first row of each episode uses delta_pt = 0.0 because there is no
+    previous episode-local Pt value to compare against.
+    """
     policy_obs = obs["policy"]
+
+    # Pt is still read from the policy observation.
     pt = float(policy_obs[0, 0].detach().cpu().item())
-    delta_pt = float(policy_obs[0, 1].detach().cpu().item())
+
+    # Do not trust policy_obs[0, 1] as delta_pt here.
+    # In previous logs it stayed at 0.0 even though Pt changed.
+    # Compute it directly for evaluation logging.
+    if prev_pt is None:
+        delta_pt = 0.0
+    else:
+        delta_pt = pt - prev_pt
 
     robot_x, robot_y = get_local_robot_xy(env_unwrapped)
 
@@ -449,9 +492,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     checkpoint_name = Path(resume_path).stem
 
     output_dir = (
-    Path(args_cli.output_dir).expanduser().resolve()
-    if args_cli.output_dir
-    else Path(log_dir) / f"align_only_evaluation_{checkpoint_name}"
+        Path(args_cli.output_dir).expanduser().resolve()
+        if args_cli.output_dir
+        else Path(log_dir) / f"align_only_evaluation_{checkpoint_name}"
     )
     output_dir = ensure_dir(output_dir)
     plots_dir = ensure_dir(output_dir / "plots")
@@ -520,6 +563,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     eval_success_counter = 0
     global_timestep = 0
 
+    # Evaluation-side previous Pt.
+    # This is reset to None at the start of every episode.
+    # The first row of each episode will therefore have delta_pt = 0.0.
+    prev_pt_eval = None
+
     print("=" * 80)
     print("[INFO] PPO ALIGN-only evaluation started")
     print(f"[INFO] Output dir: {output_dir}")
@@ -540,7 +588,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 episode_id=episode_id,
                 step=episode_step,
                 time_s=episode_step * dt,
+                prev_pt=prev_pt_eval,
             )
+
+            # Update previous Pt only after current delta_pt has been computed.
+            prev_pt_eval = row["pt"]
 
             if row["success_now"]:
                 eval_success_counter += 1
@@ -640,6 +692,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs = reset_env_and_get_obs(env)
 
                 eval_success_counter = 0
+                prev_pt_eval = None
                 episode_id += 1
                 episode_step = 0
                 episode_rows = []
@@ -654,6 +707,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"episode={episode_id}, "
                 f"episode_step={episode_step}, "
                 f"pt={row['pt']:.4f}, "
+                f"delta_pt={row['delta_pt']:.6f}, "
                 f"err={row['distance_error']:.4f}, "
                 f"speed={row['speed_norm']:.4f}, "
                 f"success_counter={eval_success_counter}"
